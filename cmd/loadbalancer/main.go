@@ -14,6 +14,7 @@ import (
 	"l7lb/internal/backend"
 	"l7lb/internal/balancer"
 	"l7lb/internal/config"
+	"l7lb/internal/health"
 	"l7lb/internal/proxy"
 )
 
@@ -73,6 +74,20 @@ func run(configPath string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	healthDone := make(chan struct{})
+	healthCtx, stopHealth := context.WithCancel(ctx)
+	defer stopHealth()
+	if cfg.HealthCheck.Enabled {
+		checker := health.New(backends, cfg.HealthCheck)
+		go func() {
+			checker.Run(healthCtx)
+			close(healthDone)
+		}()
+		slog.Info("health checks enabled", "path", cfg.HealthCheck.Path, "interval", cfg.HealthCheck.Interval.String())
+	} else {
+		close(healthDone)
+	}
+
 	errCh := make(chan error, len(servers))
 	for _, srv := range servers {
 		go func(srv *http.Server) {
@@ -99,6 +114,8 @@ func run(configPath string) error {
 			slog.Error("shutdown", "addr", srv.Addr, "err", err)
 		}
 	}
+	stopHealth()
+	<-healthDone
 	slog.Info("stopped")
 	return runErr
 }

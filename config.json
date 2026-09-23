@@ -7,6 +7,14 @@
     { "url": "http://localhost:9002" },
     { "url": "http://localhost:9003" }
   ],
+  "health_check": {
+    "enabled": true,
+    "path": "/health",
+    "interval": "5s",
+    "timeout": "2s",
+    "healthy_threshold": 2,
+    "unhealthy_threshold": 3
+  },
   "transport": {
     "dial_timeout": "2s",
     "max_idle_conns": 1000,

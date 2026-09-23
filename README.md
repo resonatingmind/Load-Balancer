@@ -8,6 +8,7 @@ A Layer 7 HTTP load balancer written in Go using only the standard library.
 - **Connection pooling**: one shared, tuned `http.Transport` keeps keep-alive connections to backends warm
 - **Pooled copy buffers**: `sync.Pool` recycles the 32KB buffers used to stream request and response bodies
 - **Strategies**: least-connections (default) and round-robin, both lock-free (atomics)
+- **Active health checks**: one prober goroutine per backend sends results over a channel to a single aggregator; a backend goes down after 3 failed probes in a row and comes back after 2 successful ones (configurable)
 - Admin endpoint with live backend state (`alive`, `active_connections`)
 - Graceful shutdown: drains in-flight requests on Ctrl+C / SIGTERM
 
@@ -21,6 +22,7 @@ internal/
   config/         JSON config loading, defaults, validation
   proxy/          shared pooled transport + buffer pool
   backend/        one upstream: reverse proxy, alive flag, active-conn counter
+  health/         active health checker (probers -> channel -> aggregator)
   balancer/       strategies (least-conn, round-robin) + the HTTP handler
 config.json       example config
 ```
@@ -78,7 +80,7 @@ go test -race ./...
 
 - [x] Reverse proxy, config, connection pooling, buffer pool
 - [x] Least-connections and round-robin strategies
-- [ ] Active health checks (per-backend goroutine, status events over channels)
+- [x] Active health checks (per-backend goroutine, status events over channels)
 - [ ] Circuit breaker (closed → open → half-open) per backend
 - [ ] Retry on another backend when a request fails
 - [ ] Prometheus `/metrics`

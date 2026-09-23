@@ -26,6 +26,10 @@ func NewStrategy(name string) (Strategy, error) {
 }
 
 // RoundRobin cycles through alive backends in order.
+//
+// It rotates over the alive backends only. Rotating over all backends and
+// skipping dead ones would hand a dead backend's turn to its neighbour,
+// giving that neighbour double traffic.
 type RoundRobin struct {
 	counter atomic.Uint64
 }
@@ -33,45 +37,73 @@ type RoundRobin struct {
 func (rr *RoundRobin) Name() string { return "round_robin" }
 
 func (rr *RoundRobin) Next(backends []*backend.Backend) *backend.Backend {
-	n := uint64(len(backends))
-	if n == 0 {
-		return nil
-	}
-	start := rr.counter.Add(1)
-	for i := uint64(0); i < n; i++ {
-		if b := backends[(start+i)%n]; b.IsAlive() {
-			return b
+	alive := 0
+	for _, b := range backends {
+		if b.IsAlive() {
+			alive++
 		}
 	}
-	return nil
+	if alive == 0 {
+		return nil
+	}
+	return nthMatching(backends, int(rr.counter.Add(1)%uint64(alive)), func(b *backend.Backend) bool {
+		return b.IsAlive()
+	})
 }
 
 // LeastConnections picks the alive backend with the fewest in-flight requests.
-// The scan starts at a rotating offset so ties (e.g. all idle) are spread
-// across backends instead of always landing on the first one.
+// Ties (e.g. every backend idle) are broken by rotating over the tied
+// backends, so they share traffic evenly instead of the first one taking it all.
 type LeastConnections struct {
-	offset atomic.Uint64
+	counter atomic.Uint64
 }
 
 func (lc *LeastConnections) Name() string { return "least_connections" }
 
 func (lc *LeastConnections) Next(backends []*backend.Backend) *backend.Backend {
-	n := len(backends)
-	if n == 0 {
-		return nil
-	}
-	start := int(lc.offset.Add(1) % uint64(n))
-
-	var best *backend.Backend
-	var bestConns int64
-	for i := 0; i < n; i++ {
-		b := backends[(start+i)%n]
+	// First pass: find the minimum connection count and how many share it.
+	var minConns int64
+	ties := 0
+	for _, b := range backends {
 		if !b.IsAlive() {
 			continue
 		}
-		if c := b.ActiveConnections(); best == nil || c < bestConns {
-			best, bestConns = b, c
+		c := b.ActiveConnections()
+		switch {
+		case ties == 0 || c < minConns:
+			minConns, ties = c, 1
+		case c == minConns:
+			ties++
 		}
 	}
-	return best
+	if ties == 0 {
+		return nil
+	}
+
+	// Second pass: pick one of the tied backends in rotation. Counts can move
+	// between passes; if no backend matches any more, fall back to any alive one.
+	k := int(lc.counter.Add(1) % uint64(ties))
+	if b := nthMatching(backends, k, func(b *backend.Backend) bool {
+		return b.IsAlive() && b.ActiveConnections() == minConns
+	}); b != nil {
+		return b
+	}
+	return nthMatching(backends, 0, func(b *backend.Backend) bool { return b.IsAlive() })
+}
+
+// nthMatching returns the k-th (0-based) backend for which match is true,
+// or the last match if there are fewer than k+1, or nil if none match.
+func nthMatching(backends []*backend.Backend, k int, match func(*backend.Backend) bool) *backend.Backend {
+	var last *backend.Backend
+	for _, b := range backends {
+		if !match(b) {
+			continue
+		}
+		if k == 0 {
+			return b
+		}
+		k--
+		last = b
+	}
+	return last
 }

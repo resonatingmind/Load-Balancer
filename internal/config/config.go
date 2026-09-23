@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -33,16 +34,29 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 }
 
 type Config struct {
-	ListenAddr string          `json:"listen_addr"`
-	AdminAddr  string          `json:"admin_addr"` // empty disables the admin server
-	Strategy   string          `json:"strategy"`   // "least_connections" or "round_robin"
-	Backends   []BackendConfig `json:"backends"`
-	Transport  TransportConfig `json:"transport"`
-	Server     ServerConfig    `json:"server"`
+	ListenAddr  string            `json:"listen_addr"`
+	AdminAddr   string            `json:"admin_addr"` // empty disables the admin server
+	Strategy    string            `json:"strategy"`   // "least_connections" or "round_robin"
+	Backends    []BackendConfig   `json:"backends"`
+	HealthCheck HealthCheckConfig `json:"health_check"`
+	Transport   TransportConfig   `json:"transport"`
+	Server      ServerConfig      `json:"server"`
 }
 
 type BackendConfig struct {
 	URL string `json:"url"`
+}
+
+// HealthCheckConfig controls the active probes sent to every backend.
+// A backend is marked down after UnhealthyThreshold consecutive failed probes
+// and back up after HealthyThreshold consecutive successful ones.
+type HealthCheckConfig struct {
+	Enabled            bool     `json:"enabled"`
+	Path               string   `json:"path"`
+	Interval           Duration `json:"interval"`
+	Timeout            Duration `json:"timeout"`
+	HealthyThreshold   int      `json:"healthy_threshold"`
+	UnhealthyThreshold int      `json:"unhealthy_threshold"`
 }
 
 // TransportConfig controls the pooled connections from the LB to the backends.
@@ -71,6 +85,14 @@ func Default() *Config {
 		ListenAddr: ":8080",
 		AdminAddr:  ":9090",
 		Strategy:   "least_connections",
+		HealthCheck: HealthCheckConfig{
+			Enabled:            true,
+			Path:               "/health",
+			Interval:           Duration{5 * time.Second},
+			Timeout:            Duration{2 * time.Second},
+			HealthyThreshold:   2,
+			UnhealthyThreshold: 3,
+		},
 		Transport: TransportConfig{
 			DialTimeout:           Duration{2 * time.Second},
 			MaxIdleConns:          1000,
@@ -117,6 +139,17 @@ func (c *Config) Validate() error {
 	for i, b := range c.Backends {
 		if b.URL == "" {
 			return fmt.Errorf("backends[%d].url is required", i)
+		}
+	}
+	if hc := c.HealthCheck; hc.Enabled {
+		if !strings.HasPrefix(hc.Path, "/") {
+			return errors.New("health_check.path must start with /")
+		}
+		if hc.Interval.Duration <= 0 || hc.Timeout.Duration <= 0 {
+			return errors.New("health_check.interval and health_check.timeout must be > 0")
+		}
+		if hc.HealthyThreshold < 1 || hc.UnhealthyThreshold < 1 {
+			return errors.New("health_check thresholds must be >= 1")
 		}
 	}
 	if c.Transport.MaxIdleConns < 0 || c.Transport.MaxIdleConnsPerHost < 0 || c.Transport.MaxConnsPerHost < 0 {

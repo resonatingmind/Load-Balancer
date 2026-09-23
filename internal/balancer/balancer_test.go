@@ -45,6 +45,27 @@ func TestRoundRobinDistributesEvenly(t *testing.T) {
 	}
 }
 
+func TestStrategiesStayFairWhenABackendIsDead(t *testing.T) {
+	for _, s := range []Strategy{&RoundRobin{}, &LeastConnections{}} {
+		t.Run(s.Name(), func(t *testing.T) {
+			bs := []*backend.Backend{
+				mustBackend(t, "http://a:1"),
+				mustBackend(t, "http://b:1"),
+				mustBackend(t, "http://c:1"),
+			}
+			bs[1].SetAlive(false)
+
+			counts := map[*backend.Backend]int{}
+			for i := 0; i < 30; i++ {
+				counts[s.Next(bs)]++
+			}
+			if counts[bs[0]] != 15 || counts[bs[2]] != 15 {
+				t.Fatalf("uneven split with one dead backend: a=%d c=%d, want 15/15", counts[bs[0]], counts[bs[2]])
+			}
+		})
+	}
+}
+
 func TestStrategiesSkipDeadBackends(t *testing.T) {
 	for _, s := range []Strategy{&RoundRobin{}, &LeastConnections{}} {
 		t.Run(s.Name(), func(t *testing.T) {
