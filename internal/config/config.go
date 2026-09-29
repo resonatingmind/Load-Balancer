@@ -34,13 +34,31 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 }
 
 type Config struct {
-	ListenAddr  string            `json:"listen_addr"`
-	AdminAddr   string            `json:"admin_addr"` // empty disables the admin server
-	Strategy    string            `json:"strategy"`   // "least_connections" or "round_robin"
-	Backends    []BackendConfig   `json:"backends"`
-	HealthCheck HealthCheckConfig `json:"health_check"`
-	Transport   TransportConfig   `json:"transport"`
-	Server      ServerConfig      `json:"server"`
+	ListenAddr     string               `json:"listen_addr"`
+	AdminAddr      string               `json:"admin_addr"` // empty disables the admin server
+	Strategy       string               `json:"strategy"`   // "least_connections" or "round_robin"
+	Backends       []BackendConfig      `json:"backends"`
+	AccessLog      bool                 `json:"access_log"` // one log line per request; disable for benchmarks
+	HealthCheck    HealthCheckConfig    `json:"health_check"`
+	CircuitBreaker CircuitBreakerConfig `json:"circuit_breaker"`
+	Retry          RetryConfig          `json:"retry"`
+	Transport      TransportConfig      `json:"transport"`
+	Server         ServerConfig         `json:"server"`
+}
+
+// RetryConfig controls retrying failed requests on a different backend.
+// Only idempotent requests without a body (GET, HEAD, OPTIONS) are retried.
+type RetryConfig struct {
+	MaxRetries int `json:"max_retries"` // 0 disables retries
+}
+
+// CircuitBreakerConfig controls the per-backend circuit breaker, which trips
+// on failures seen in real traffic (5xx responses and connection errors).
+type CircuitBreakerConfig struct {
+	Enabled          bool     `json:"enabled"`
+	FailureThreshold int      `json:"failure_threshold"`  // consecutive failures that open the circuit
+	OpenTimeout      Duration `json:"open_timeout"`       // how long to stay open before trying again
+	HalfOpenRequests int      `json:"half_open_requests"` // trial requests allowed; all must succeed to close
 }
 
 type BackendConfig struct {
@@ -85,6 +103,8 @@ func Default() *Config {
 		ListenAddr: ":8080",
 		AdminAddr:  ":9090",
 		Strategy:   "least_connections",
+		AccessLog:  true,
+		Retry:      RetryConfig{MaxRetries: 2},
 		HealthCheck: HealthCheckConfig{
 			Enabled:            true,
 			Path:               "/health",
@@ -92,6 +112,12 @@ func Default() *Config {
 			Timeout:            Duration{2 * time.Second},
 			HealthyThreshold:   2,
 			UnhealthyThreshold: 3,
+		},
+		CircuitBreaker: CircuitBreakerConfig{
+			Enabled:          true,
+			FailureThreshold: 5,
+			OpenTimeout:      Duration{10 * time.Second},
+			HalfOpenRequests: 1,
 		},
 		Transport: TransportConfig{
 			DialTimeout:           Duration{2 * time.Second},
@@ -116,6 +142,9 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
+	// Windows editors (and PowerShell 5.1) often save UTF-8 with a BOM,
+	// which encoding/json rejects.
+	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
 
 	cfg := Default()
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -151,6 +180,17 @@ func (c *Config) Validate() error {
 		if hc.HealthyThreshold < 1 || hc.UnhealthyThreshold < 1 {
 			return errors.New("health_check thresholds must be >= 1")
 		}
+	}
+	if cb := c.CircuitBreaker; cb.Enabled {
+		if cb.FailureThreshold < 1 || cb.HalfOpenRequests < 1 {
+			return errors.New("circuit_breaker.failure_threshold and half_open_requests must be >= 1")
+		}
+		if cb.OpenTimeout.Duration <= 0 {
+			return errors.New("circuit_breaker.open_timeout must be > 0")
+		}
+	}
+	if c.Retry.MaxRetries < 0 {
+		return errors.New("retry.max_retries must be >= 0")
 	}
 	if c.Transport.MaxIdleConns < 0 || c.Transport.MaxIdleConnsPerHost < 0 || c.Transport.MaxConnsPerHost < 0 {
 		return errors.New("transport connection limits must be >= 0")

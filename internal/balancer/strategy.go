@@ -8,7 +8,8 @@ import (
 )
 
 // Strategy picks the backend for the next request. Implementations must be
-// safe for concurrent use and return nil when no backend is alive.
+// safe for concurrent use and return nil when no backend is available
+// (healthy and with a closed or trial-ready circuit).
 type Strategy interface {
 	Next(backends []*backend.Backend) *backend.Backend
 	Name() string
@@ -39,7 +40,7 @@ func (rr *RoundRobin) Name() string { return "round_robin" }
 func (rr *RoundRobin) Next(backends []*backend.Backend) *backend.Backend {
 	alive := 0
 	for _, b := range backends {
-		if b.IsAlive() {
+		if b.Available() {
 			alive++
 		}
 	}
@@ -47,7 +48,7 @@ func (rr *RoundRobin) Next(backends []*backend.Backend) *backend.Backend {
 		return nil
 	}
 	return nthMatching(backends, int(rr.counter.Add(1)%uint64(alive)), func(b *backend.Backend) bool {
-		return b.IsAlive()
+		return b.Available()
 	})
 }
 
@@ -65,7 +66,7 @@ func (lc *LeastConnections) Next(backends []*backend.Backend) *backend.Backend {
 	var minConns int64
 	ties := 0
 	for _, b := range backends {
-		if !b.IsAlive() {
+		if !b.Available() {
 			continue
 		}
 		c := b.ActiveConnections()
@@ -84,11 +85,11 @@ func (lc *LeastConnections) Next(backends []*backend.Backend) *backend.Backend {
 	// between passes; if no backend matches any more, fall back to any alive one.
 	k := int(lc.counter.Add(1) % uint64(ties))
 	if b := nthMatching(backends, k, func(b *backend.Backend) bool {
-		return b.IsAlive() && b.ActiveConnections() == minConns
+		return b.Available() && b.ActiveConnections() == minConns
 	}); b != nil {
 		return b
 	}
-	return nthMatching(backends, 0, func(b *backend.Backend) bool { return b.IsAlive() })
+	return nthMatching(backends, 0, func(b *backend.Backend) bool { return b.Available() })
 }
 
 // nthMatching returns the k-th (0-based) backend for which match is true,

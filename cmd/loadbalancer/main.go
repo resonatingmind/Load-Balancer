@@ -13,8 +13,10 @@ import (
 
 	"l7lb/internal/backend"
 	"l7lb/internal/balancer"
+	"l7lb/internal/circuitbreaker"
 	"l7lb/internal/config"
 	"l7lb/internal/health"
+	"l7lb/internal/middleware"
 	"l7lb/internal/proxy"
 )
 
@@ -42,7 +44,11 @@ func run(configPath string) error {
 
 	backends := make([]*backend.Backend, 0, len(cfg.Backends))
 	for _, bc := range cfg.Backends {
-		b, err := backend.New(bc.URL, transport, bufPool)
+		var breaker *circuitbreaker.Breaker
+		if cfg.CircuitBreaker.Enabled {
+			breaker = circuitbreaker.New(bc.URL, cfg.CircuitBreaker)
+		}
+		b, err := backend.New(bc.URL, transport, bufPool, breaker)
 		if err != nil {
 			return err
 		}
@@ -53,11 +59,18 @@ func run(configPath string) error {
 	if err != nil {
 		return err
 	}
-	lb := balancer.New(backends, strategy)
+	lb := balancer.New(backends, strategy, balancer.Options{MaxRetries: cfg.Retry.MaxRetries})
+
+	// Request flow: RequestID -> AccessLog (optional) -> LoadBalancer.
+	var handler http.Handler = lb
+	if cfg.AccessLog {
+		handler = middleware.AccessLog(slog.Default(), handler)
+	}
+	handler = middleware.RequestID(handler)
 
 	servers := []*http.Server{{
 		Addr:              cfg.ListenAddr,
-		Handler:           lb,
+		Handler:           handler,
 		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout.Duration,
 		ReadTimeout:       cfg.Server.ReadTimeout.Duration,
 		WriteTimeout:      cfg.Server.WriteTimeout.Duration,
@@ -97,7 +110,7 @@ func run(configPath string) error {
 			}
 		}(srv)
 	}
-	slog.Info("load balancer started", "strategy", strategy.Name(), "backends", len(backends))
+	slog.Info("load balancer started", "strategy", strategy.Name(), "backends", len(backends), "max_retries", cfg.Retry.MaxRetries)
 
 	var runErr error
 	select {

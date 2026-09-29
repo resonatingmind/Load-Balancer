@@ -26,7 +26,7 @@ func testConfig() config.HealthCheckConfig {
 
 func mustBackend(t *testing.T, rawURL string) *backend.Backend {
 	t.Helper()
-	b, err := backend.New(rawURL, http.DefaultTransport, nil)
+	b, err := backend.New(rawURL, http.DefaultTransport, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -5,13 +5,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"l7lb/internal/backend"
+	"l7lb/internal/circuitbreaker"
+	"l7lb/internal/config"
 )
 
 func mustBackend(t *testing.T, rawURL string) *backend.Backend {
 	t.Helper()
-	b, err := backend.New(rawURL, http.DefaultTransport, nil)
+	b, err := backend.New(rawURL, http.DefaultTransport, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +118,7 @@ func TestLeastConnectionsPrefersIdleBackend(t *testing.T) {
 }
 
 func TestLoadBalancerProxiesAcrossBackends(t *testing.T) {
-	lb := New([]*backend.Backend{namedServer(t, "one"), namedServer(t, "two")}, &RoundRobin{})
+	lb := New([]*backend.Backend{namedServer(t, "one"), namedServer(t, "two")}, &RoundRobin{}, Options{})
 	front := httptest.NewServer(lb)
 	defer front.Close()
 
@@ -137,10 +140,52 @@ func TestLoadBalancerProxiesAcrossBackends(t *testing.T) {
 	}
 }
 
+func TestCircuitBreakerIsolatesFailingBackend(t *testing.T) {
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer failing.Close()
+
+	cbCfg := config.CircuitBreakerConfig{
+		Enabled:          true,
+		FailureThreshold: 3,
+		OpenTimeout:      config.Duration{Duration: time.Minute}, // stays open for the whole test
+		HalfOpenRequests: 1,
+	}
+	bad, err := backend.New(failing.URL, http.DefaultTransport, nil, circuitbreaker.New("bad", cbCfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := namedServer(t, "good")
+
+	front := httptest.NewServer(New([]*backend.Backend{bad, good}, &RoundRobin{}, Options{}))
+	defer front.Close()
+
+	errors := 0
+	for i := 0; i < 20; i++ {
+		resp, err := http.Get(front.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			errors++
+		}
+	}
+	// The bad backend fails exactly FailureThreshold times, then its circuit
+	// opens and every remaining request goes to the good backend.
+	if errors != 3 {
+		t.Fatalf("got %d failed requests, want 3 (the failure threshold)", errors)
+	}
+	if got := bad.CircuitState(); got != "open" {
+		t.Fatalf("bad backend circuit = %s, want open", got)
+	}
+}
+
 func TestLoadBalancerReturns503WhenNoBackendAlive(t *testing.T) {
 	b := namedServer(t, "one")
 	b.SetAlive(false)
-	lb := New([]*backend.Backend{b}, &LeastConnections{})
+	lb := New([]*backend.Backend{b}, &LeastConnections{}, Options{})
 
 	rec := httptest.NewRecorder()
 	lb.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))

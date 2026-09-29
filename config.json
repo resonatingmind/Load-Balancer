@@ -2,6 +2,10 @@
   "listen_addr": ":8080",
   "admin_addr": ":9090",
   "strategy": "least_connections",
+  "access_log": true,
+  "retry": {
+    "max_retries": 2
+  },
   "backends": [
     { "url": "http://localhost:9001" },
     { "url": "http://localhost:9002" },
@@ -14,6 +18,12 @@
     "timeout": "2s",
     "healthy_threshold": 2,
     "unhealthy_threshold": 3
+  },
+  "circuit_breaker": {
+    "enabled": true,
+    "failure_threshold": 5,
+    "open_timeout": "10s",
+    "half_open_requests": 1
   },
   "transport": {
     "dial_timeout": "2s",
